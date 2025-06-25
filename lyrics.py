@@ -151,6 +151,7 @@ class Letras(DadosClasseBase):
         def processar(row):
             letra:str = row["letra"]
 
+            # Pula letras vazias
             if pd.isnull(letra) or not isinstance(letra, str):
                 return pd.Series({
                 'total_palavras': None,
@@ -159,27 +160,29 @@ class Letras(DadosClasseBase):
                 'palavras': None,
             }) 
 
+            # separa as palavras ema lista
             palavras = re.findall(r"[a-zãõẽĩũáéúíóçêôêîâü]+", letra.lower())
             
+            # Extração de alguns insights simples
             total_palavras = len(palavras)
             total_palavras_unicas = len(set(palavras))
             media_tamanho_palavras = sum(len(p) for p in palavras) / total_palavras
             palavras_relevantes = (p for p in palavras if len(p) >= 3 and p not in stopwords)
 
+            # Cria novas colunas com os insights
             return pd.Series({
                 'total_palavras': total_palavras,
                 'total_palavras_unicas': total_palavras_unicas,
                 'media_tamanho_palavras': media_tamanho_palavras,
                 'palavras': palavras_relevantes,
             })
-        
 
+        # remove letras duplicadas
         self.dados["sem_acentos"] = self.dados["letra"].dropna().apply(remove_accents)
-        # self.dados = self.dados.drop_duplicates("sem_acentos")
-        # self.dados.drop(columns = ["sem_acentos"])
-            
+        self.dados = self.dados.drop_duplicates("sem_acentos")
+        self.dados.drop(columns = ["sem_acentos"])
 
-        self.dados.dropna(subset='letra')
+        # Limpa os dados das letras e retorna novas colunas
         self.dados [['total_palavras', "total_palavras_unicas", "media_tamanho_palavras", "palavras"]] = self.dados.apply(processar, axis=1)
 
     def genero(self, genero:str) -> Genero:
@@ -194,18 +197,4 @@ class Letras(DadosClasseBase):
     
 
 l = Letras(pd.read_csv("letras.csv"))
-# for i in l.get_generos():
-#     print(i)
-
 print(len(l.dados))
-
-gen = l.genero("velha guarda")
-
-for i in gen.dados.iterrows():
-    print(i)
-    break
-# print(gen)
-# for i in gen.palavras_mais_ocorrentes(20):
-#     print(i)
-# print(gen.numero_medio_palavras())
-# print(gen.TTR())
