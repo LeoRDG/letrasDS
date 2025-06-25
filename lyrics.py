@@ -42,6 +42,38 @@ def remove_accents(text: str) -> str:
 class DadosClasseBase:
     dados: pd.DataFrame = field(repr=False)
     size: int = field(repr=True, init=False)
+    nome: str = field(init=False)
+
+    def n_gram(self, n: int = 2, top: int = 10) -> dict[tuple[str]: dict[str: int]]:
+        """Calcula frases mais ocorrentes"""
+        print(f"ngram {self.nome or "ALL"} {n}")
+
+        total_counter = Counter()
+        song_tracker = defaultdict(set)
+
+        for i, row in self.dados.iterrows():
+            letra = row["letra"]
+
+            tokens = nltk.word_tokenize(letra)
+            song_ngrams = set()
+
+            for ng in ngrams(tokens, n):
+                if any(len(word) < 4 for word in ng):
+                    continue
+
+                total_counter[ng] += 1
+                song_ngrams.add(ng)
+
+            for ng in song_ngrams:
+                song_tracker[ng].add(i)
+
+        result = {
+            ng: {"count": total_counter[ng], "songs": len(song_tracker[ng])} 
+            for ng in total_counter
+        }
+
+        result = sorted(result.items(), key= lambda x: x[1]["count"], reverse=True)
+        return result[:top]       
 
     def __post_init__(self):
         self.size = len(self.dados)
