@@ -148,7 +148,15 @@ class Letras(DadosClasseBase):
         # self.dados["palavras"] = self.dados["letra"].apply(lambda letra: [i for i in re.findall( r"[a-zãõẽĩũáéúíóçêôêîâü]{3,}", str(letra).lower()) if i and i not in stopwords])
 
     def processar_letras(self) -> None:
+        print("processando letras")
+        t1 = time()
+        global counter
+        counter = 0
         def processar(row):
+            global counter
+            if counter % 20000 == 0:
+                print(f"Calculando médias {counter}/{len(self.dados)}")
+            counter += 1
             letra:str = row["letra"]
 
             # Pula letras vazias
@@ -178,12 +186,14 @@ class Letras(DadosClasseBase):
             })
 
         # remove letras duplicadas
+        print("- removendo duplicatas")
         self.dados["sem_acentos"] = self.dados["letra"].dropna().apply(remove_accents)
         self.dados = self.dados.drop_duplicates("sem_acentos")
         self.dados.drop(columns = ["sem_acentos"])
 
         # Limpa os dados das letras e retorna novas colunas
         self.dados [['total_palavras', "total_palavras_unicas", "media_tamanho_palavras", "palavras"]] = self.dados.apply(processar, axis=1)
+        print(f"{len(self.dados)} letras processadas em {time()-t1:.1f} s")
 
     def genero(self, genero:str) -> Genero:
         """Retorna a classe Genero com todas as entradas desse genero"""
