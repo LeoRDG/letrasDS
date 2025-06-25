@@ -54,6 +54,9 @@ class DadosClasseBase:
         for i, row in self.dados.iterrows():
             letra = row["letra"]
 
+            if not isinstance(letra, str):
+                continue
+            
             tokens = nltk.word_tokenize(letra)
             song_ngrams = set()
 
