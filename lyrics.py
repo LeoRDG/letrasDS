@@ -1,48 +1,73 @@
-import pandas as pd
-from nltk.tokenize import word_tokenize
-from collections import Counter
+import re
 import nltk
 import string
-import re
-from dataclasses import dataclass, field
 import unicodedata
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
+from nltk.util import ngrams
+from wordcloud import WordCloud
+from time import perf_counter as pf
+from dataclasses import dataclass, field
+from lexicalrichness import LexicalRichness
+from collections import Counter, defaultdict
 
-punctuation = string.punctuation
+nltk.download("punkt")
+nltk.download("reuters")
 
-def load_stopwords():
-    stopwords = set()
-    with open("stopwords") as f:
-        for l in f.readlines():
-            stopwords.add(l.strip())
-    return stopwords
+contador_global: int = 0
+pontuação: str = string.punctuation
+lexico_re: re = re.compile(r'^(.+)\..+N0=([\d-]+)')
+stopwords: set = set(i.strip() for i in open("stopwords").readlines())
+lexico: dict = {lexico_re.match(linha).groups() for linha in open("SentiLex-PT02/SentiLex-lem-PT02.txt").readlines() if lexico_re.match(linha)}
 
-stopwords = load_stopwords()
-
-
-def keep_row_genero(cell) -> bool:
-    """Manter apenas as entradas com uma só categoria, exceto se for musicas gaúchas"""
-    if ";" in cell:
-        return any(("gaúcha" in i for i in cell.split(";")))
-    if "/" in cell or cell == "nan":
-        return False
-    return True
-
-
-def process_generos(cell):
-    cell = remove_accents(str(cell)).strip().replace("-", " ")
-    return "gauchas" if "gauchas" in cell else cell
-
-def remove_accents(text: str) -> str:
-    text = text.lower().replace("\n", " ")
+def remover_acentos(text: str) -> str:
+    """ Remove o acento de letras """
+    text = text.replace("\n", " ")
     return ''.join( c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn" )
+
+def calcular_sentimento(palavras :list) -> float:
+    """ Calcula o sentimento de uma lista de palavras """
+    polaridades = [lexico.get(p, 0) for p in palavras if p in lexico]
+    return round(sum(polaridades) / len(polaridades), 3) if polaridades else 0.0
+
+def calcular_robustez(letra: str, media_tamanho_palavra: float = None) -> float:
+    """Calcula a robustez de um texto"""
+    lex = LexicalRichness(letra)
+    
+    try:
+        ttr = lex.ttr
+        mtld = lex.mtld(threshold=.72)
+        mattr = lex.mattr(window_size=25)
+    except ZeroDivisionError:
+        return 0.0
+    except ValueError:
+        mattr=lex.mattr(window_size=1)
+    
+    # MTLD ranges 10-200+, TTR is 0-1
+    # Combine them using simple z-scores or min-max scaling
+    score = (
+        ttr * 1.5 +        # TTR: high = more diverse
+        (mtld / 100) +     # scale down for comparability
+        (mattr * 1.5)      # MATTR: high = better local richness
+    )
+
+    # Add mean word length if available
+    if media_tamanho_palavra is not None:
+        score += media_tamanho_palavra * 0.5
+
+    return round(score, 3)
 
 
 @dataclass
 class DadosClasseBase:
     dados: pd.DataFrame = field(repr=False)
     size: int = field(repr=True, init=False)
-    nome: str = field(init=False)
+    nome: str = field(init=False, default="")
+
+    def sentimento(self):
+        return self.dados["sentimento"].median()
 
     def n_gram(self, n: int = 2, top: int = 10) -> dict[tuple[str]: dict[str: int]]:
         """Calcula frases mais ocorrentes"""
@@ -102,6 +127,7 @@ class DadosClasseBase:
         return Counter(total_palavras) if num <= 0 else Counter(total_palavras).most_common(num)
 
     def get_generos(self) -> Counter:
+        """ Retorna um Counter com os gêneros e a quantidade de músicas desse gênero"""
         data = [item for item in self.dados["genero"]]
         return Counter(data).most_common()
     
@@ -120,87 +146,76 @@ class DadosClasseBase:
         return count / count2
 
     def TTR(self):
-        
-        valores = []
-        data = self.dados["palavras"]
-        data = self.dados['letra']
+        pass
 
-        for i in data:
-            if isinstance(i, str):
-                i = i.split()
-            if not i:
-                continue
-            print(i)        
-            palavras_unicas = set(i)
-
-            valores.append(len(palavras_unicas) / len(i))
-            
-
-        return sum(valores) / len(valores)
 
 @dataclass
 class Artista(DadosClasseBase):
-    nome: str
+    nome: str = field(repr=True)
 
-    
 @dataclass
 class Genero(DadosClasseBase):
     nome: str = field(repr=True)
-    size: int = field(repr=True, init=False)
-
-    def __post_init__(self):
-        self.size = len(self.dados)
-
 
 @dataclass
 class Letras(DadosClasseBase):
     def __post_init__(self):
         self.processar_dados()
 
+    ()
     def processar_dados(self) -> None:
-        """Processa os dados para serem mais fácilmente trabalhados"""
-
+        """Processa self.dados para serem trabalhados.
+        É chamada quando essa classe é criada"""
+        
+        # Renomear colunas
         self.dados.rename( inplace=True, columns={
                 "Nome da Música": "musica",
                 "Artista": "artista",
                 "Gênero Musical": "genero",
                 "Letra da Música": "letra"
-             })
+             }) 
         
-        # Limpeza dos dados baseando em genero
-        self.dados["genero"] = self.dados["genero"].apply(process_generos)
-        self.dados = self.dados.loc[self.dados["genero"].apply(keep_row_genero)]
-        self.dados = self.dados.copy()
-
-        self.dados["artista"] = self.dados["artista"].apply(lambda item: str(item).strip().lower())
-
-        # Remove letras duplicadas
-        
-
-        
+        self.dados = self.dados.dropna() # Remove entradas vazias
+        self.processar_generos()
+        self.dados["artista"] = self.dados["artista"].apply(lambda a: str(a).strip().lower()) # Normaliza os nomes dos artistas
         self.processar_letras()
 
         # self.dados["palavras"] = self.dados["letra"].apply(lambda letra: [i for i in re.findall( r"[a-zãõẽĩũáéúíóçêôêîâü]{3,}", str(letra).lower()) if i and i not in stopwords])
 
+    ()
+    def processar_generos(self) -> None:
+        """ Processa os generos """
+        def processar(cell: str) -> str:
+            """ Normaliza os nomes na coluna gênero, remove acentos e - """
+            cell = remover_acentos(str(cell)).strip().replace("-", " ").lower()
+            return "gauchas" if "gauchas" in cell else cell
+
+        self.dados["genero"] = self.dados["genero"].apply(processar)
+        self.dados = self.dados.groupby("genero").filter(lambda g: len(g) >= 80) # Remove generos com menos de 80 músicas
+        self.dados = self.dados.loc[self.dados["genero"].apply(lambda g: not("/" in g or ";" in g))] # Remove generos compostos
+        self.dados = self.dados.copy()
+
     def processar_letras(self) -> None:
-        print("processando letras")
-        t1 = time()
-        global counter
-        counter = 0
+        """ Processa as letras das músicas """
+
+        global contador_global
+
         def processar(row):
-            global counter
-            if counter % 20000 == 0:
-                print(f"Calculando médias {counter}/{len(self.dados)}")
-            counter += 1
+            global contador_global
+            if contador_global % 1000 == 0:
+                print(f"Calculando médias {contador_global}/{len(self.dados)}", end="\r")
+            contador_global += 1
             letra:str = row["letra"]
 
-            # Pula letras vazias
+            # Pula letras vazias (não deve mais acontecer)
             if pd.isnull(letra) or not isinstance(letra, str):
                 return pd.Series({
-                'total_palavras': None,
-                'total_palavras_unicas': None,
-                'media_tamanho_palavras': None,
                 'palavras': None,
+                'total_palavras': None,
+                'palavras_unicas': None,
+                'tamanho_medio': None,
+                'sentimento': None,
+                "robustez": None
             }) 
 
             # separa as palavras ema lista
@@ -208,27 +223,45 @@ class Letras(DadosClasseBase):
             
             # Extração de alguns insights simples
             total_palavras = len(palavras)
-            total_palavras_unicas = len(set(palavras))
-            media_tamanho_palavras = sum(len(p) for p in palavras) / total_palavras
-            palavras_relevantes = (p for p in palavras if len(p) >= 3 and p not in stopwords)
+            palavras_unicas = len(set(palavras))
+            tamanho_medio = round(sum(len(p) for p in palavras) / total_palavras, 3)
+            palavras_relevantes = [p for p in palavras if len(p) >= 3 and p not in stopwords]
+            sentimento = calcular_sentimento(palavras_relevantes)
+            robustez = calcular_robustez(letra)
 
+            
             # Cria novas colunas com os insights
             return pd.Series({
-                'total_palavras': total_palavras,
-                'total_palavras_unicas': total_palavras_unicas,
-                'media_tamanho_palavras': media_tamanho_palavras,
                 'palavras': palavras_relevantes,
+                'total_palavras': int(total_palavras),
+                'palavras_unicas': int(palavras_unicas),
+                'tamanho_medio': float(tamanho_medio),
+                'sentimento': float(sentimento),
+                "robustez": float(robustez)
             })
 
-        # remove letras duplicadas
-        print("- removendo duplicatas")
-        self.dados["sem_acentos"] = self.dados["letra"].dropna().apply(remove_accents)
-        self.dados = self.dados.drop_duplicates("sem_acentos")
-        self.dados.drop(columns = ["sem_acentos"])
+
+        def remover_duplicatas():
+            # remove letras duplicadas
+            print("- removendo duplicatas", end='\r')
+            self.dados["sem_acentos"] = self.dados["letra"].dropna().apply(remover_acentos)
+            self.dados = self.dados.drop_duplicates("sem_acentos")
+            self.dados.drop(columns = ["sem_acentos"], inplace=True)
+            
+        contador_global = 0
+        remover_duplicatas()
+        
 
         # Limpa os dados das letras e retorna novas colunas
-        self.dados [['total_palavras', "total_palavras_unicas", "media_tamanho_palavras", "palavras"]] = self.dados.apply(processar, axis=1)
-        print(f"{len(self.dados)} letras processadas em {time()-t1:.1f} s")
+        self.dados [[
+            "palavras",
+            'total_palavras',
+            "palavras_unicas",
+            "tamanho_medio",
+            "sentimento",
+            "robustez"
+            ]] = self.dados.apply(processar, axis=1)
+        print("DONE")
 
     def genero(self, genero:str) -> Genero:
         """Retorna a classe Genero com todas as entradas desse genero"""
@@ -242,4 +275,139 @@ class Letras(DadosClasseBase):
     
 
 l = Letras(pd.read_csv("letras.csv"))
-print(len(l.dados))
+generos_desejados = ["sertanejo","funk carioca", "infantil", "heavy metal", "regional"]
+
+print("_"*60)
+print("Gêneros")
+for gen, n in l.get_generos():
+    print(f"{gen:>15} {n}")
+print("_"*60)
+
+print()
+print("_"*60)
+print("Artistas")
+for a, n in l.get_artistas():
+    print(f"{gen:>15} {n}")
+print("_"*60)
+
+print()
+for gen in generos_desejados:
+    print(gen)
+    dados_genero = l.genero(gen)
+    
+    print('.'*5)
+    print("mais comuns")
+    for i in dados_genero.palavras_mais_comuns(10):
+        print(i)
+
+
+    print('.'*5)
+    print("mais ocorrentes")
+    for i in dados_genero.palavras_mais_ocorrentes(10):
+        print(i)
+    
+    print("."*5)
+    print("frases mais comuns/ocorrentes")
+    for i, j in zip(dados_genero.n_gram(2), dados_genero.n_gram(3)):
+        print(f"{i} {" ":<20} {j}")
+    print()
+    print("_"*60)
+        
+
+
+
+###################################################### 
+##################### GRÁFICOS #######################
+######################################################  
+
+# plt.figure(figsize=(10, 6))
+# plt.xlim(0, 800)
+# sns.histplot(l.dados['total_palavras'].dropna(), bins=50, kde=True)
+# plt.title("Distribuição do número de palavras por música")
+# plt.xlabel("Total de palavras")
+# plt.ylabel("Número de músicas")
+# plt.grid(True)
+# plt.show()
+
+# plt.figure(figsize=(10, 6))
+# sns.scatterplot(
+#     data=l.dados,
+#     x='total_palavras',
+#     y='palavras_unicas',
+#     alpha=0.6
+# )
+# plt.title("Relação entre total de palavras e palavras únicas")
+# plt.xlabel("Total de palavras")
+# plt.ylabel("Palavras únicas")
+# plt.grid(True)
+# plt.show()
+
+
+# l.dados = l.dados[l.dados['genero'].str.lower().isin(generos)]
+
+# plt.figure(figsize=(12, 6))
+# sns.boxplot(data=l.dados, x='genero', y='total_palavras')
+# plt.xticks(rotation=45)
+# plt.title("Distribuição do total de palavras por gênero")
+# plt.xlabel("Gênero")
+# plt.ylabel("Total de palavras")
+# plt.tight_layout()
+# plt.grid(True)
+# plt.show()
+
+# plt.figure(figsize=(12, 6))
+# sns.boxplot(data=l.dados, x='genero', y='robustez')
+# plt.xticks(rotation=45)
+# plt.title("Robustez lexical por gênero")
+# plt.xlabel("Gênero")
+# plt.ylabel("Pontuação de robustez")
+# plt.tight_layout()
+# plt.grid(True)
+# plt.show()
+
+
+# Normaliza o nome do gênero para evitar problemas de capitalização
+# df_filtrado = l.dados[l.dados['genero'].str.lower().isin(generos_desejados)]
+# generos = df_filtrado['genero'].unique()
+# sns.heatmap(df_filtrado[['total_palavras', 'palavras_unicas', 'tamanho_medio', 'sentimento', 'robustez']].corr(), annot=True, cmap='coolwarm')
+# plt.title("Correlação entre métricas")
+# plt.show()
+
+# for i in l.n_gram(2, 5):
+#     print(i)
+# for i in l.n_gram(3, 5):
+#     print(i)
+# for i in l.n_gram(4, 5):
+#     print(i)
+# for i in l.n_gram(5, 5):
+#     print(i)
+
+# for genero in generos_desejados:
+#     dados = l.genero(genero)
+
+#     print(dados, dados.sentimento())
+#     count = dados.palavras_mais_ocorrentes(5)
+#     songs = dados.palavras_mais_comuns(5)
+
+#     for i, j in zip(count, songs):
+#         print(i, j)
+
+#     for i in dados.n_gram(2, 5):
+#         print(i)
+#     for i in dados.n_gram(3, 5):
+#         print(i)
+#     print("_____________________________________________")
+#     input()
+
+# contagem_generos = l.dados['genero'].value_counts().sort_values(ascending=False)
+# plt.figure(figsize=(12, 6))
+# sns.barplot(
+#     x=contagem_generos.values[:20],
+#     y=contagem_generos.index[:20],
+#     palette="mako"
+# )
+# plt.title("Top 20 gêneros com mais músicas no dataset")
+# plt.xlabel("Número de músicas")
+# plt.ylabel("Gênero")
+# plt.tight_layout()
+# plt.show()
